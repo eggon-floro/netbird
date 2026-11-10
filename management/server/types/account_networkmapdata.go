@@ -301,6 +301,7 @@ func twinRoute(r *nbroute.Route) *nmdata.Route {
 		AccountID:           r.AccountID,
 		PublicID:            r.PublicID,
 		Network:             r.Network,
+		TranslatedNetwork:   r.TranslatedNetwork,
 		Domains:             r.Domains,
 		KeepRoute:           r.KeepRoute,
 		NetID:               string(r.NetID),
@@ -329,17 +330,18 @@ func TwinNetworkResource(r *resourceTypes.NetworkResource) *nmdata.NetworkResour
 		return nil
 	}
 	return &nmdata.NetworkResource{
-		ID:          r.ID,
-		NetworkID:   r.NetworkID,
-		AccountID:   r.AccountID,
-		PublicID:    r.PublicID,
-		Name:        r.Name,
-		Description: r.Description,
-		Type:        string(r.Type),
-		Address:     r.Address,
-		Domain:      r.Domain,
-		Prefix:      r.Prefix,
-		Enabled:     r.Enabled,
+		ID:               r.ID,
+		NetworkID:        r.NetworkID,
+		AccountID:        r.AccountID,
+		PublicID:         r.PublicID,
+		Name:             r.Name,
+		Description:      r.Description,
+		Type:             string(r.Type),
+		Address:          r.Address,
+		Domain:           r.Domain,
+		Prefix:           r.Prefix,
+		TranslatedPrefix: r.TranslatedPrefix,
+		Enabled:          r.Enabled,
 	}
 }
 

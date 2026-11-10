@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	log "github.com/sirupsen/logrus"
@@ -16,25 +17,33 @@ import (
 )
 
 func (s *SqlStore) getNetworkResources(ctx context.Context, accountID string) ([]*resourceTypes.NetworkResource, error) {
-	const query = `SELECT id, network_id, account_id, public_id, name, description, type, domain, prefix, enabled FROM network_resources WHERE account_id = $1`
+	const query = `SELECT id, network_id, account_id, public_id, name, description, type, domain, prefix, translated_prefix, enabled FROM network_resources WHERE account_id = $1`
 	rows, err := s.pgxPool().Query(ctx, query, accountID)
 	if err != nil {
 		return nil, err
 	}
 	resources, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (resourceTypes.NetworkResource, error) {
 		var r resourceTypes.NetworkResource
-		var prefix []byte
+		var prefix, translatedPrefix []byte
 		var enabled sql.NullBool
-		err := row.Scan(&r.ID, &r.NetworkID, &r.AccountID, &r.PublicID, &r.Name, &r.Description, &r.Type, &r.Domain, &prefix, &enabled)
-		if err == nil {
-			if enabled.Valid {
-				r.Enabled = enabled.Bool
-			}
-			if prefix != nil {
-				_ = json.Unmarshal(prefix, &r.Prefix)
+		err := row.Scan(&r.ID, &r.NetworkID, &r.AccountID, &r.PublicID, &r.Name, &r.Description, &r.Type, &r.Domain, &prefix, &translatedPrefix, &enabled)
+		if err != nil {
+			return r, err
+		}
+		if enabled.Valid {
+			r.Enabled = enabled.Bool
+		}
+		if prefix != nil {
+			_ = json.Unmarshal(prefix, &r.Prefix)
+		}
+		// Loading the resource untranslated would route its traffic to the
+		// wrong hosts, so an unreadable translation fails the load.
+		if translatedPrefix != nil {
+			if err := json.Unmarshal(translatedPrefix, &r.TranslatedPrefix); err != nil {
+				return r, fmt.Errorf("parse translated prefix of resource %s: %w", r.ID, err)
 			}
 		}
-		return r, err
+		return r, nil
 	})
 	if err != nil {
 		return nil, err

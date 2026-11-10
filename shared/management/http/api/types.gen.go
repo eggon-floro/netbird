@@ -3761,6 +3761,9 @@ type NetworkResource struct {
 	// Name Network resource name
 	Name string `json:"name"`
 
+	// TranslatedAddress Address the routing peers translate `address` to before forwarding, one address for each address. Peers reach the resource at `address`, while the hosts behind the routing peers keep the addresses in `translated_address`. It lets networks that use the same addresses be reached at the same time under distinct ones. Only for host and subnet resources, and it must have the same IP version and prefix length as `address`
+	TranslatedAddress *string `json:"translated_address,omitempty"`
+
 	// Type Network resource type based of the address
 	Type NetworkResourceType `json:"type"`
 }
@@ -3778,6 +3781,9 @@ type NetworkResourceMinimum struct {
 
 	// Name Network resource name
 	Name string `json:"name"`
+
+	// TranslatedAddress Address the routing peers translate `address` to before forwarding, one address for each address. Peers reach the resource at `address`, while the hosts behind the routing peers keep the addresses in `translated_address`. It lets networks that use the same addresses be reached at the same time under distinct ones. Only for host and subnet resources, and it must have the same IP version and prefix length as `address`
+	TranslatedAddress *string `json:"translated_address,omitempty"`
 }
 
 // NetworkResourceRequest defines model for NetworkResourceRequest.
@@ -3796,6 +3802,9 @@ type NetworkResourceRequest struct {
 
 	// Name Network resource name
 	Name string `json:"name"`
+
+	// TranslatedAddress Address the routing peers translate `address` to before forwarding, one address for each address. Peers reach the resource at `address`, while the hosts behind the routing peers keep the addresses in `translated_address`. It lets networks that use the same addresses be reached at the same time under distinct ones. Only for host and subnet resources, and it must have the same IP version and prefix length as `address`
+	TranslatedAddress *string `json:"translated_address,omitempty"`
 }
 
 // NetworkResourceType Network resource type based of the address
