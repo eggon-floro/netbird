@@ -97,7 +97,11 @@ type Route struct {
 	AccountID string `gorm:"index"`
 	PublicID  string `json:"-" gorm:"index"`
 	// Network and Domains are mutually exclusive
-	Network             netip.Prefix `gorm:"serializer:json"`
+	Network netip.Prefix `gorm:"serializer:json"`
+	// TranslatedNetwork is the prefix the routing peer maps Network onto, address for address,
+	// before forwarding. Peers route and address Network; the routed hosts keep their own
+	// addresses in TranslatedNetwork. Zero when Network is routed as is.
+	TranslatedNetwork   netip.Prefix `gorm:"-"`
 	Domains             domain.List  `gorm:"serializer:json"`
 	KeepRoute           bool
 	NetID               NetID
@@ -133,6 +137,7 @@ func (r *Route) Copy() *Route {
 		Description:         r.Description,
 		NetID:               r.NetID,
 		Network:             r.Network,
+		TranslatedNetwork:   r.TranslatedNetwork,
 		Domains:             slices.Clone(r.Domains),
 		KeepRoute:           r.KeepRoute,
 		NetworkType:         r.NetworkType,
@@ -161,6 +166,7 @@ func (r *Route) Equal(other *Route) bool {
 		other.Description == r.Description &&
 		other.NetID == r.NetID &&
 		other.Network == r.Network &&
+		other.TranslatedNetwork == r.TranslatedNetwork &&
 		slices.Equal(r.Domains, other.Domains) &&
 		other.KeepRoute == r.KeepRoute &&
 		other.NetworkType == r.NetworkType &&

@@ -32,7 +32,8 @@ type PeerNamespace struct {
 	// PeerAddr is the IPv6 address of the peer end.
 	PeerAddr string
 
-	jobs chan func()
+	peerName string
+	jobs     chan func()
 }
 
 type nsReady struct {
@@ -55,9 +56,10 @@ func NewPeerNamespace(t *testing.T) *PeerNamespace {
 		IfaceName: "wt-" + name,
 		HostAddr:  fmt.Sprintf("fd00:%x:%x::1", suffix[0], suffix[1:]),
 		PeerAddr:  fmt.Sprintf("fd00:%x:%x::2", suffix[0], suffix[1:]),
+		peerName:  "np-" + name,
 		jobs:      make(chan func()),
 	}
-	peerName := "np-" + name
+	peerName := ns.peerName
 
 	ready := make(chan nsReady, 1)
 	go ns.serve(ready)

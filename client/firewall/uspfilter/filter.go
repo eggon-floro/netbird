@@ -602,7 +602,13 @@ func (m *Manager) IsStateful() bool {
 	return m.stateful
 }
 
-func (m *Manager) AddNatRule(firewall.RouterPair) error {
+func (m *Manager) AddNatRule(pair firewall.RouterPair) error {
+	// The forwarder dials the address the packet carries, so serving a
+	// translated route here would send its traffic to the untranslated prefix.
+	if pair.IsTranslated() {
+		return fmt.Errorf("translate %s to %s: %w", pair.Destination, pair.Translated, firewall.ErrTranslationNotSupported)
+	}
+
 	// userspace routed packets are always SNATed to the inbound direction
 	// TODO: implement outbound SNAT
 	return nil

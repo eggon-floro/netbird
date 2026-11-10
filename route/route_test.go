@@ -106,3 +106,20 @@ func TestExpandV6ExitPairs(t *testing.T) {
 		})
 	}
 }
+
+func TestRoute_TranslatedNetworkCopiedAndCompared(t *testing.T) {
+	r := &Route{
+		ID:                "route1",
+		Network:           netip.MustParsePrefix("10.201.7.0/24"),
+		TranslatedNetwork: netip.MustParsePrefix("192.168.77.0/24"),
+	}
+
+	copied := r.Copy()
+	assert.Equal(t, r.TranslatedNetwork, copied.TranslatedNetwork, "Copy must keep the translated network")
+	assert.True(t, r.Equal(copied), "a route must equal its copy")
+
+	// The route server replaces the firewall rules of a route only when the
+	// route changed, so a new mapping must not compare equal to the old one.
+	copied.TranslatedNetwork = netip.MustParsePrefix("192.168.88.0/24")
+	assert.False(t, r.Equal(copied), "routes that map onto different prefixes must not be equal")
+}

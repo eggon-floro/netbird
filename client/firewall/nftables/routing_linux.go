@@ -4,6 +4,7 @@ package nftables
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/google/nftables"
@@ -19,6 +20,10 @@ import (
 )
 
 func (r *family) AddNatRule(pair firewall.RouterPair) error {
+	if err := pair.ValidateTranslation(); err != nil {
+		return err
+	}
+
 	if err := r.refreshRulesMap(); err != nil {
 		return fmt.Errorf(refreshRulesMapError, err)
 	}
@@ -59,6 +64,9 @@ func (r *family) AddNatRule(pair firewall.RouterPair) error {
 	if legacyExprs != nil {
 		r.queueLegacyRouteRule(pair, legacyExprs)
 	}
+	if pair.IsTranslated() {
+		r.queueTranslationRule(pair)
+	}
 	if pair.Masquerade {
 		r.queueNatRule(pair, natExprs)
 		r.queueNatRule(inverse, inverseExprs)
@@ -76,6 +84,7 @@ func (r *family) AddNatRule(pair firewall.RouterPair) error {
 func (r *family) rollbackRules(pair firewall.RouterPair) {
 	keys := []firewall.RuleID{
 		pair.GenKey(firewall.ForwardingFormat),
+		pair.GenKey(firewall.TranslationFormat),
 		pair.GenKey(firewall.PreroutingFormat),
 		firewall.GetInversePair(pair).GenKey(firewall.PreroutingFormat),
 	}
@@ -89,6 +98,112 @@ func (r *family) rollbackRules(pair firewall.RouterPair) {
 		}
 		delete(r.rules, key)
 	}
+}
+
+// queueTranslationRule replaces any tracked translation rule for the pair and
+// queues the rule that maps the pair's destination onto its translated prefix,
+// address for address. The route ACLs run after it, on the translated address.
+// Failures are logged rather than returned, for the reason queueNatRule gives.
+func (r *family) queueTranslationRule(pair firewall.RouterPair) {
+	ruleID := pair.GenKey(firewall.TranslationFormat)
+
+	if _, exists := r.rules[ruleID]; exists {
+		if err := r.removeTranslationRule(pair); err != nil {
+			log.Errorf("replace translation rule %s: %v", ruleID, err)
+			return
+		}
+	}
+
+	translated := pair.Translated.Masked()
+	exprs := []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 1,
+			Data:     ifname(r.wgIface.Name()),
+		},
+	}
+	exprs = append(exprs, prefixMatchExprs(r.af, pair.Destination.Prefix, false)...)
+	// A prefix NAT takes the first and last address of the target range and
+	// keeps the host bits of the packet's own address.
+	exprs = append(exprs,
+		&expr.Immediate{Register: 1, Data: translated.Addr().AsSlice()},
+		&expr.Immediate{Register: 2, Data: calculateLastIP(translated).AsSlice()},
+		&expr.NAT{
+			Type:       expr.NATTypeDestNAT,
+			Family:     uint32(r.af.tableFamily),
+			RegAddrMin: 1,
+			RegAddrMax: 2,
+			Prefix:     true,
+		},
+	)
+
+	rule := &nftables.Rule{
+		Table:    r.workTable,
+		Chain:    r.chains[chainNameRoutingRdr],
+		Exprs:    exprs,
+		UserData: []byte(ruleID),
+	}
+	before, err := r.translationPosition(ruleID, pair.Destination.Prefix)
+	if err != nil {
+		log.Warnf("order translation rule %s, appending it: %v", ruleID, err)
+	}
+	if before != 0 {
+		rule.Position = before
+		r.rules[ruleID] = r.conn.InsertRule(rule)
+	} else {
+		r.rules[ruleID] = r.conn.AddRule(rule)
+	}
+	r.translations[ruleID] = pair.Destination.Prefix
+}
+
+// translationPosition returns the handle of the rule that the translation rule
+// for prefix goes in front of, or 0 to append it. Translation rules are kept
+// most specific first, so a host mapped inside a mapped subnet takes precedence
+// the way its more specific route does.
+func (r *family) translationPosition(ruleID firewall.RuleID, prefix netip.Prefix) (uint64, error) {
+	rules, err := r.conn.GetRules(r.workTable, r.chains[chainNameRoutingRdr])
+	if err != nil {
+		return 0, fmt.Errorf("list %s rules: %w", chainNameRoutingRdr, err)
+	}
+	for _, rule := range rules {
+		id := firewall.RuleID(rule.UserData)
+		// The pair's previous rule may still be listed: its removal is queued.
+		if id == ruleID {
+			continue
+		}
+		if other, ok := r.translations[id]; ok && other.Bits() < prefix.Bits() {
+			return rule.Handle, nil
+		}
+	}
+	return 0, nil
+}
+
+// removeTranslationRule queues the removal of the pair's translation rule. The
+// caller flushes.
+func (r *family) removeTranslationRule(pair firewall.RouterPair) error {
+	ruleID := pair.GenKey(firewall.TranslationFormat)
+
+	rule, exists := r.rules[ruleID]
+	if !exists {
+		delete(r.translations, ruleID)
+		return nil
+	}
+
+	if rule.Handle == 0 {
+		log.Warnf("translation rule %s has no handle, removing stale entry", ruleID)
+		delete(r.rules, ruleID)
+		delete(r.translations, ruleID)
+		return nil
+	}
+
+	if err := r.conn.DelRule(rule); err != nil {
+		return fmt.Errorf("remove translation rule %s: %w", ruleID, err)
+	}
+	delete(r.rules, ruleID)
+	delete(r.translations, ruleID)
+
+	return nil
 }
 
 // natRuleExprs resolves the match expressions of the pair's prerouting
@@ -465,6 +580,10 @@ func (r *family) RemoveNatRule(pair firewall.RouterPair) error {
 	}
 
 	var merr *multierror.Error
+
+	if err := r.removeTranslationRule(pair); err != nil {
+		merr = multierror.Append(merr, err)
+	}
 
 	if pair.Masquerade {
 		if err := r.removeNatRule(pair); err != nil {
