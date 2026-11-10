@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"net/netip"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/netbirdio/netbird/client/firewall/fwtest"
 	firewall "github.com/netbirdio/netbird/client/firewall/manager"
 	"github.com/netbirdio/netbird/client/firewall/test"
 	"github.com/netbirdio/netbird/client/iface"
+	"github.com/netbirdio/netbird/client/iface/wgaddr"
 	nbnet "github.com/netbirdio/netbird/client/net"
 )
 
@@ -412,4 +415,146 @@ func TestFindSetNameInRule(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIptablesManager_TranslatedNatRule covers a route whose destination peers
+// address is mapped onto the hosts' own prefix. The mapping, the exemption from
+// the external DNAT guard, and the return masquerade on the hosts' prefix must
+// be installed together, replaced together when the mapping changes, and
+// removed together.
+func TestIptablesManager_TranslatedNatRule(t *testing.T) {
+	if !isIptablesSupported() {
+		t.SkipNow()
+	}
+
+	iptablesClient, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
+	require.NoError(t, err, "failed to init iptables client")
+
+	manager, err := newFamily(iptablesClient, ifaceMock, iface.DefaultMTU)
+	require.NoError(t, err, "shouldn't return error")
+	require.NoError(t, manager.init(nil))
+	t.Cleanup(func() {
+		assert.NoError(t, manager.Reset(), "shouldn't return error")
+	})
+
+	pair := firewall.RouterPair{
+		ID:          "abc",
+		Source:      firewall.Network{Prefix: netip.MustParsePrefix("100.100.100.1/32")},
+		Destination: firewall.Network{Prefix: netip.MustParsePrefix("10.201.7.0/24")},
+		Masquerade:  true,
+		Translated:  netip.MustParsePrefix("192.168.77.0/24"),
+	}
+	netmapRule := func(to string) []string {
+		return []string{"-i", ifaceMock.Name(), "-d", "10.201.7.0/24", "-j", "NETMAP", "--to", to}
+	}
+	guardExemption := []string{
+		"-i", ifaceMock.Name(),
+		"!", "-o", ifaceMock.Name(),
+		"-m", "conntrack", "--ctorigdst", "10.201.7.0/24",
+		"-j", "ACCEPT",
+	}
+	inverseMarkingRule := func(source string) []string {
+		return []string{
+			"!", "-i", ifaceMock.Name(),
+			"-m", "conntrack",
+			"--ctstate", "NEW",
+			"-s", source,
+			"-d", pair.Source.String(),
+			"-j", "MARK", "--set-mark",
+			fmt.Sprintf("%#x", nbnet.PreroutingFwmarkMasqueradeReturn),
+		}
+	}
+
+	require.NoError(t, manager.AddNatRule(pair), "translated route should be added")
+
+	checkTableRuleSpecs(t, iptablesClient, tableNat, chainRTRdr, true, netmapRule("192.168.77.0/24")...)
+	checkTableRuleSpecs(t, iptablesClient, tableMangle, chainRTTranslated, true, guardExemption...)
+	// Replies come from the hosts' own addresses, so the return masquerade
+	// has to match those and not the alias.
+	checkTableRuleSpecs(t, iptablesClient, tableMangle, chainRTPre, true, inverseMarkingRule("192.168.77.0/24")...)
+	checkTableRuleSpecs(t, iptablesClient, tableMangle, chainRTPre, false, inverseMarkingRule("10.201.7.0/24")...)
+
+	// The exemption is useless if the guard drops the packet first.
+	rules, err := iptablesClient.List(tableMangle, chainForward)
+	require.NoError(t, err, "failed to list mangle forward rules")
+	jumpIndex, guardIndex := -1, -1
+	for i, rule := range rules {
+		switch {
+		case strings.Contains(rule, "-j "+chainRTTranslated):
+			jumpIndex = i
+		case strings.Contains(rule, "--ctstate DNAT"):
+			guardIndex = i
+		}
+	}
+	require.NotEqual(t, -1, jumpIndex, "the jump to %s should exist in mangle FORWARD", chainRTTranslated)
+	require.NotEqual(t, -1, guardIndex, "the external DNAT guard should exist in mangle FORWARD")
+	assert.Less(t, jumpIndex, guardIndex, "the translated routes chain must come before the external DNAT guard")
+
+	// A new mapping for the same route replaces the old one.
+	pair.Translated = netip.MustParsePrefix("192.168.88.0/24")
+	require.NoError(t, manager.AddNatRule(pair), "changed translation should be applied")
+	checkTableRuleSpecs(t, iptablesClient, tableNat, chainRTRdr, false, netmapRule("192.168.77.0/24")...)
+	checkTableRuleSpecs(t, iptablesClient, tableNat, chainRTRdr, true, netmapRule("192.168.88.0/24")...)
+
+	require.NoError(t, manager.RemoveNatRule(pair), "translated route should be removed")
+	checkTableRuleSpecs(t, iptablesClient, tableNat, chainRTRdr, false, netmapRule("192.168.88.0/24")...)
+	checkTableRuleSpecs(t, iptablesClient, tableMangle, chainRTTranslated, false, guardExemption...)
+	assert.NotContains(t, manager.rules, pair.GenKey(firewall.TranslationFormat), "the mapping must leave the rule map")
+	assert.NotContains(t, manager.rules, pair.GenKey(firewall.TranslationGuardFormat), "the exemption must leave the rule map")
+}
+
+// TestIptablesManager_TranslatedNatRuleRejectsMismatch covers a mapping between
+// prefixes of different lengths, which cannot map address for address. Nothing
+// may be installed for it.
+func TestIptablesManager_TranslatedNatRuleRejectsMismatch(t *testing.T) {
+	if !isIptablesSupported() {
+		t.SkipNow()
+	}
+
+	iptablesClient, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
+	require.NoError(t, err, "failed to init iptables client")
+
+	manager, err := newFamily(iptablesClient, ifaceMock, iface.DefaultMTU)
+	require.NoError(t, err, "shouldn't return error")
+	require.NoError(t, manager.init(nil))
+	t.Cleanup(func() {
+		assert.NoError(t, manager.Reset(), "shouldn't return error")
+	})
+
+	pair := firewall.RouterPair{
+		ID:          "abc",
+		Source:      firewall.Network{Prefix: netip.MustParsePrefix("100.100.100.1/32")},
+		Destination: firewall.Network{Prefix: netip.MustParsePrefix("10.201.7.0/24")},
+		Masquerade:  true,
+		Translated:  netip.MustParsePrefix("192.168.0.0/16"),
+	}
+
+	require.Error(t, manager.AddNatRule(pair), "a mapping between different prefix lengths must be refused")
+
+	rules, err := iptablesClient.List(tableNat, chainRTRdr)
+	require.NoError(t, err, "failed to list %s", chainRTRdr)
+	for _, rule := range rules {
+		assert.NotContains(t, rule, "NETMAP", "no mapping may be installed for a refused pair")
+	}
+	assert.NotContains(t, manager.rules, pair.GenKey(firewall.NatFormat), "no masquerade may be installed for a refused pair")
+}
+
+// TestIptablesManager_TranslatedRouteForwards sends real packets through a translated route.
+func TestIptablesManager_TranslatedRouteForwards(t *testing.T) {
+	if !isIptablesSupported() {
+		t.SkipNow()
+	}
+
+	fwtest.RunTranslatedRoute(t, func(t *testing.T, ifaceName string, addr wgaddr.Address) firewall.Manager {
+		t.Helper()
+		mock := &iFaceMock{
+			NameFunc:    func() string { return ifaceName },
+			AddressFunc: func() wgaddr.Address { return addr },
+		}
+		manager, err := Create(mock, iface.DefaultMTU)
+		require.NoError(t, err, "create manager")
+		require.NoError(t, manager.Init(nil))
+		t.Cleanup(func() { assert.NoError(t, manager.Close(nil), "close manager") })
+		return manager
+	})
 }

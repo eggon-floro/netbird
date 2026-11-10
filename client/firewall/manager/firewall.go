@@ -15,6 +15,10 @@ import (
 // method but the IPv6 firewall components were not initialized.
 var ErrIPv6NotInitialized = errors.New("IPv6 firewall not initialized")
 
+// ErrTranslationNotSupported is returned when a route that maps its destination
+// onto another prefix is handed to a firewall backend that cannot translate it.
+var ErrTranslationNotSupported = errors.New("destination translation is not supported by this firewall")
+
 // ErrNoSources is returned when AddFilterRule is called with an empty
 // source list. "Match any source" must be expressed explicitly with a
 // /0 prefix; an empty list is a caller error and is rejected rather
@@ -26,6 +30,8 @@ const (
 	ForwardingFormat       = "netbird-fwd-%s-%t"
 	PreroutingFormat       = "netbird-prerouting-%s-%t"
 	NatFormat              = "netbird-nat-%s-%t"
+	TranslationFormat      = "netbird-translate-%s-%t"
+	TranslationGuardFormat = "netbird-translate-guard-%s-%t"
 )
 
 // RuleID identifies a firewall rule. It is a typed string so the

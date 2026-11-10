@@ -15,6 +15,10 @@ import (
 )
 
 func (r *family) AddNatRule(pair firewall.RouterPair) error {
+	if err := pair.ValidateTranslation(); err != nil {
+		return err
+	}
+
 	if r.legacyManagement {
 		log.Warnf("This peer is connected to a NetBird Management service with an older version. Allowing all traffic for %s", pair.Destination)
 		if err := r.addLegacyRouteRule(pair); err != nil {
@@ -22,13 +26,16 @@ func (r *family) AddNatRule(pair firewall.RouterPair) error {
 		}
 	}
 
-	if pair.Masquerade {
-		if err := r.addNatRule(pair); err != nil {
-			return fmt.Errorf("add nat rule: %w", err)
+	if pair.IsTranslated() {
+		if err := r.addTranslationRules(pair); err != nil {
+			return fmt.Errorf("add translation rules: %w", err)
 		}
+	}
 
-		if err := r.addNatRule(firewall.GetInversePair(pair)); err != nil {
-			return fmt.Errorf("add inverse nat rule: %w", err)
+	if pair.Masquerade {
+		if err := r.addMasqueradeRules(pair); err != nil {
+			r.rollbackTranslationRules(pair)
+			return err
 		}
 	}
 
@@ -37,8 +44,24 @@ func (r *family) AddNatRule(pair firewall.RouterPair) error {
 	return nil
 }
 
+func (r *family) addMasqueradeRules(pair firewall.RouterPair) error {
+	if err := r.addNatRule(pair); err != nil {
+		return fmt.Errorf("add nat rule: %w", err)
+	}
+
+	if err := r.addNatRule(firewall.GetInversePair(pair)); err != nil {
+		return fmt.Errorf("add inverse nat rule: %w", err)
+	}
+
+	return nil
+}
+
 // RemoveNatRule removes an iptables rule pair from forwarding and nat chains
 func (r *family) RemoveNatRule(pair firewall.RouterPair) error {
+	if err := r.removeTranslationRules(pair); err != nil {
+		return fmt.Errorf("remove translation rules: %w", err)
+	}
+
 	if pair.Masquerade {
 		if err := r.removeNatRule(pair); err != nil {
 			return fmt.Errorf("remove nat rule: %w", err)
@@ -251,6 +274,81 @@ func (r *family) addNatRule(pair firewall.RouterPair) (err error) {
 	r.rules[ruleID] = rule
 
 	return nil
+}
+
+// addTranslationRules maps the pair's destination onto its translated prefix,
+// address for address, and exempts the mapped traffic from the external DNAT
+// guard. The guard exists for traffic addressed to this host that someone else
+// redirects past the peer ACLs; traffic translated here is routed traffic, and
+// the route ACLs still decide on it in the filter table.
+func (r *family) addTranslationRules(pair firewall.RouterPair) error {
+	if err := r.removeTranslationRules(pair); err != nil {
+		return fmt.Errorf("replace existing rules: %w", err)
+	}
+
+	iface := r.wgIface.Name()
+	destination := pair.Destination.Prefix.Masked().String()
+
+	translate := []string{
+		"-i", iface,
+		"-d", destination,
+		"-j", "NETMAP", "--to", pair.Translated.Masked().String(),
+	}
+	if err := r.iptablesClient.Append(tableNat, chainRTRdr, translate...); err != nil {
+		return fmt.Errorf("map %s onto %s: %w", destination, pair.Translated, err)
+	}
+	r.rules[pair.GenKey(firewall.TranslationFormat)] = translate
+
+	// Hairpinned traffic is left out, so it still meets the hairpin guard.
+	accept := []string{
+		"-i", iface,
+		"!", "-o", iface,
+		"-m", "conntrack", "--ctorigdst", destination,
+		"-j", "ACCEPT",
+	}
+	if err := r.iptablesClient.Append(tableMangle, chainRTTranslated, accept...); err != nil {
+		r.rollbackTranslationRules(pair)
+		return fmt.Errorf("exempt %s from the DNAT guard: %w", destination, err)
+	}
+	r.rules[pair.GenKey(firewall.TranslationGuardFormat)] = accept
+
+	return nil
+}
+
+// rollbackTranslationRules undoes a partly applied translated pair. The caller
+// is already returning the error that led here, so a failure is only logged.
+func (r *family) rollbackTranslationRules(pair firewall.RouterPair) {
+	if err := r.removeTranslationRules(pair); err != nil {
+		log.Errorf("roll back translation rules for %s: %v", pair.Destination, err)
+	}
+}
+
+// removeTranslationRules removes the rules addTranslationRules installed for
+// the pair. The rules are looked up by the pair's ID, so it also removes the
+// rules of an earlier version of the pair that mapped onto another prefix.
+func (r *family) removeTranslationRules(pair firewall.RouterPair) error {
+	var merr *multierror.Error
+
+	for _, location := range []struct {
+		ruleID firewall.RuleID
+		table  string
+		chain  string
+	}{
+		{pair.GenKey(firewall.TranslationGuardFormat), tableMangle, chainRTTranslated},
+		{pair.GenKey(firewall.TranslationFormat), tableNat, chainRTRdr},
+	} {
+		rule, exists := r.rules[location.ruleID]
+		if !exists {
+			continue
+		}
+		if err := r.iptablesClient.DeleteIfExists(location.table, location.chain, rule...); err != nil {
+			merr = multierror.Append(merr, fmt.Errorf("remove rule %s: %w", location.ruleID, err))
+			continue
+		}
+		delete(r.rules, location.ruleID)
+	}
+
+	return nberrors.FormatErrorOrNil(merr)
 }
 
 func (r *family) removeNatRule(pair firewall.RouterPair) error {

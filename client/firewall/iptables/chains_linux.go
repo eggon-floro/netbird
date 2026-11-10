@@ -24,6 +24,7 @@ func (r *family) createContainers() error {
 		{chainRTNAT, tableNat},
 		{chainRTRdr, tableNat},
 		{chainRTMSSClamp, tableMangle},
+		{chainRTTranslated, tableMangle},
 	} {
 		// Fallback: clear chains that survived an unclean shutdown.
 		if ok, _ := r.iptablesClient.ChainExists(chainInfo.table, chainInfo.chain); ok {
@@ -80,6 +81,13 @@ func (r *family) addJumpRules() error {
 		return fmt.Errorf("add nat prerouting jump rule: %w", err)
 	}
 	r.rules[jumpNATPre] = rdrRule
+
+	// Jump to the translated routes chain, ahead of the mangle FORWARD guards
+	translatedRule := jumpRuleSpec(chainRTTranslated)
+	if err := r.iptablesClient.Insert(tableMangle, chainForward, 1, translatedRule...); err != nil {
+		return fmt.Errorf("add mangle forward jump rule: %w", err)
+	}
+	r.rules[jumpTranslate] = translatedRule
 
 	return nil
 }
@@ -235,6 +243,7 @@ func (r *family) cleanUpDefaultForwardRules() error {
 		{chainRTRdr, tableNat},
 		{chainNATOutput, tableNat},
 		{chainRTMSSClamp, tableMangle},
+		{chainRTTranslated, tableMangle},
 	} {
 		ok, err := r.iptablesClient.ChainExists(chainInfo.table, chainInfo.chain)
 		if err != nil {
@@ -259,6 +268,7 @@ func (r *family) cleanJumpRules() error {
 		jumpManglePre: {tableMangle, chainPrerouting, chainRTPre},
 		jumpNATPre:    {tableNat, chainPrerouting, chainRTRdr},
 		jumpMSSClamp:  {tableMangle, chainForward, chainRTMSSClamp},
+		jumpTranslate: {tableMangle, chainForward, chainRTTranslated},
 		jumpNATOutput: {tableNat, chainOutput, chainNATOutput},
 	}
 

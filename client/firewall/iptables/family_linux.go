@@ -46,12 +46,17 @@ const (
 	chainRTRdr       = "NETBIRD-RT-RDR"
 	chainNATOutput   = "NETBIRD-NAT-OUTPUT"
 	chainRTMSSClamp  = "NETBIRD-RT-MSSCLAMP"
+	// chainRTTranslated holds an accept per translated route, so traffic this
+	// family mapped onto another prefix skips the external DNAT guard in mangle
+	// FORWARD and is left to the route ACLs.
+	chainRTTranslated = "NETBIRD-RT-TRANSLATED"
 
 	jumpManglePre  = "jump-mangle-pre"
 	jumpNATPre     = "jump-nat-pre"
 	jumpNATPost    = "jump-nat-post"
 	jumpNATOutput  = "jump-nat-output"
 	jumpMSSClamp   = "jump-mss-clamp"
+	jumpTranslate  = "jump-translate"
 	markManglePre  = "mark-mangle-pre"
 	markManglePost = "mark-mangle-post"
 	matchSet       = "--match-set"

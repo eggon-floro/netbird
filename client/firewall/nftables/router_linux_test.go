@@ -3,6 +3,7 @@
 package nftables
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net/netip"
 	"os/exec"
@@ -15,9 +16,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/netbirdio/netbird/client/firewall/fwtest"
 	firewall "github.com/netbirdio/netbird/client/firewall/manager"
 	"github.com/netbirdio/netbird/client/firewall/test"
 	"github.com/netbirdio/netbird/client/iface"
+	"github.com/netbirdio/netbird/client/iface/wgaddr"
 	"github.com/netbirdio/netbird/client/internal/acl/id"
 )
 
@@ -1143,4 +1146,154 @@ func TestConvertPrefixesToSet_IPv6(t *testing.T) {
 	// 2001:db8::1/128 end (2001:db8::2)
 	assert.Equal(t, netip.MustParseAddr("2001:db8::2").As16(), [16]byte(elements[3].Key))
 	assert.True(t, elements[3].IntervalEnd)
+}
+
+// TestNftablesManager_TranslatedNatRule covers a route whose destination peers
+// address is mapped onto the hosts' own prefix. The mapping must be a prefix
+// NAT onto the whole target range, the return masquerade must match the hosts'
+// prefix, a changed mapping must replace the old one, and removal must leave
+// nothing behind.
+func TestNftablesManager_TranslatedNatRule(t *testing.T) {
+	if check() != NFTABLES {
+		t.Skip("nftables not supported on this system")
+	}
+
+	manager, err := Create(ifaceMock, iface.DefaultMTU)
+	require.NoError(t, err)
+	require.NoError(t, manager.Init(nil))
+	t.Cleanup(func() {
+		require.NoError(t, manager.Close(nil))
+	})
+	rtr := manager.family4
+
+	pair := firewall.RouterPair{
+		ID:          "translated",
+		Source:      firewall.Network{Prefix: netip.MustParsePrefix("100.100.100.1/32")},
+		Destination: firewall.Network{Prefix: netip.MustParsePrefix("10.201.7.0/24")},
+		Masquerade:  true,
+		Translated:  netip.MustParsePrefix("192.168.77.0/24"),
+	}
+	translationKey := pair.GenKey(firewall.TranslationFormat)
+
+	require.NoError(t, rtr.AddNatRule(pair), "translated route should be added")
+
+	rules := rulesWithKey(t, rtr, chainNameRoutingRdr, translationKey)
+	require.Len(t, rules, 1, "one mapping rule should be installed")
+	assertPrefixNAT(t, rules[0], "192.168.77.0", "192.168.77.255")
+
+	// Replies come from the hosts' own addresses, so the return masquerade
+	// has to match those and not the alias.
+	inverseKey := firewall.GetInversePair(pair).GenKey(firewall.PreroutingFormat)
+	inverse := rulesWithKey(t, rtr, chainNameManglePrerouting, inverseKey)
+	require.Len(t, inverse, 1, "the return masquerade marking rule should be installed")
+	assert.True(t, hasCmpData(inverse[0], []byte{192, 168, 77, 0}), "the return masquerade must match the translated prefix")
+	assert.False(t, hasCmpData(inverse[0], []byte{10, 201, 7, 0}), "the return masquerade must not match the alias")
+
+	pair.Translated = netip.MustParsePrefix("192.168.88.0/24")
+	require.NoError(t, rtr.AddNatRule(pair), "changed translation should be applied")
+	rules = rulesWithKey(t, rtr, chainNameRoutingRdr, translationKey)
+	require.Len(t, rules, 1, "the old mapping must be replaced, not kept next to the new one")
+	assertPrefixNAT(t, rules[0], "192.168.88.0", "192.168.88.255")
+
+	require.NoError(t, rtr.RemoveNatRule(pair), "translated route should be removed")
+	assert.Empty(t, rulesWithKey(t, rtr, chainNameRoutingRdr, translationKey), "the mapping must be removed from the kernel")
+	assert.NotContains(t, rtr.rules, translationKey, "the mapping must leave the rule map")
+}
+
+// TestNftablesManager_TranslatedNatRuleRejectsMismatch covers a mapping between
+// prefixes of different lengths, which cannot map address for address. Nothing
+// may be installed for it.
+func TestNftablesManager_TranslatedNatRuleRejectsMismatch(t *testing.T) {
+	if check() != NFTABLES {
+		t.Skip("nftables not supported on this system")
+	}
+
+	manager, err := Create(ifaceMock, iface.DefaultMTU)
+	require.NoError(t, err)
+	require.NoError(t, manager.Init(nil))
+	t.Cleanup(func() {
+		require.NoError(t, manager.Close(nil))
+	})
+	rtr := manager.family4
+
+	pair := firewall.RouterPair{
+		ID:          "mismatch",
+		Source:      firewall.Network{Prefix: netip.MustParsePrefix("100.100.100.1/32")},
+		Destination: firewall.Network{Prefix: netip.MustParsePrefix("10.201.7.0/24")},
+		Masquerade:  true,
+		Translated:  netip.MustParsePrefix("192.168.0.0/16"),
+	}
+
+	require.Error(t, rtr.AddNatRule(pair), "a mapping between different prefix lengths must be refused")
+	assert.Empty(t, rulesWithKey(t, rtr, chainNameRoutingRdr, pair.GenKey(firewall.TranslationFormat)), "no mapping may be installed for a refused pair")
+	assert.Empty(t, rulesWithKey(t, rtr, chainNameManglePrerouting, pair.GenKey(firewall.PreroutingFormat)), "no masquerade may be installed for a refused pair")
+}
+
+func rulesWithKey(t *testing.T, rtr *family, chainName string, key firewall.RuleID) []*nftables.Rule {
+	t.Helper()
+
+	chain := rtr.chains[chainName]
+	require.NotNil(t, chain, "chain %s should exist", chainName)
+	rules, err := rtr.conn.GetRules(rtr.workTable, chain)
+	require.NoError(t, err, "should list rules of %s", chainName)
+
+	var matched []*nftables.Rule
+	for _, rule := range rules {
+		if firewall.RuleID(rule.UserData) == key {
+			matched = append(matched, rule)
+		}
+	}
+	return matched
+}
+
+// assertPrefixNAT checks that the rule rewrites the destination onto the range
+// first..last keeping the host bits, which is what a prefix NAT does.
+func assertPrefixNAT(t *testing.T, rule *nftables.Rule, first, last string) {
+	t.Helper()
+
+	registers := map[uint32][]byte{}
+	var nat *expr.NAT
+	for _, e := range rule.Exprs {
+		switch e := e.(type) {
+		case *expr.Immediate:
+			registers[e.Register] = e.Data
+		case *expr.NAT:
+			nat = e
+		}
+	}
+
+	require.NotNil(t, nat, "the rule should end in a NAT expression")
+	assert.Equal(t, expr.NATTypeDestNAT, nat.Type, "the mapping must rewrite the destination")
+	assert.True(t, nat.Prefix, "the mapping must keep the host bits of each address")
+	assert.Equal(t, netip.MustParseAddr(first).AsSlice(), registers[nat.RegAddrMin], "the range must start at the first translated address")
+	assert.Equal(t, netip.MustParseAddr(last).AsSlice(), registers[nat.RegAddrMax], "the range must end at the last translated address")
+}
+
+func hasCmpData(rule *nftables.Rule, data []byte) bool {
+	for _, e := range rule.Exprs {
+		if cmp, ok := e.(*expr.Cmp); ok && bytes.Equal(cmp.Data, data) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestNftablesManager_TranslatedRouteForwards sends real packets through a translated route.
+func TestNftablesManager_TranslatedRouteForwards(t *testing.T) {
+	if check() != NFTABLES {
+		t.Skip("nftables not supported on this system")
+	}
+
+	fwtest.RunTranslatedRoute(t, func(t *testing.T, ifaceName string, addr wgaddr.Address) firewall.Manager {
+		t.Helper()
+		mock := &iFaceMock{
+			NameFunc:    func() string { return ifaceName },
+			AddressFunc: func() wgaddr.Address { return addr },
+		}
+		manager, err := Create(mock, iface.DefaultMTU)
+		require.NoError(t, err, "create manager")
+		require.NoError(t, manager.Init(nil))
+		t.Cleanup(func() { assert.NoError(t, manager.Close(nil), "close manager") })
+		return manager
+	})
 }

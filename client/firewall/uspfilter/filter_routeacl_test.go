@@ -392,6 +392,26 @@ func TestDeleteRouteRuleAfterIdempotentAdd(t *testing.T) {
 	assert.False(t, pass, "Traffic should not pass after rule deletion")
 }
 
+// TestAddNatRuleRejectsTranslatedRoute covers a route that maps its prefix onto
+// another one. The forwarder would dial the untranslated address, which on the
+// routed network belongs to some other host, so the route must be refused
+// rather than served.
+func TestAddNatRuleRejectsTranslatedRoute(t *testing.T) {
+	manager := setupTestManager(t)
+
+	pair := fw.RouterPair{
+		ID:          "route1",
+		Source:      fw.Network{Prefix: netip.MustParsePrefix("0.0.0.0/0")},
+		Destination: fw.Network{Prefix: netip.MustParsePrefix("10.201.7.0/24")},
+		Masquerade:  true,
+	}
+	require.NoError(t, manager.AddNatRule(pair), "an untranslated route is served")
+
+	pair.Translated = netip.MustParsePrefix("192.168.77.0/24")
+	err := manager.AddNatRule(pair)
+	assert.ErrorIs(t, err, fw.ErrTranslationNotSupported, "a translated route must be refused")
+}
+
 func setupTestManager(t *testing.T) *Manager {
 	t.Helper()
 
