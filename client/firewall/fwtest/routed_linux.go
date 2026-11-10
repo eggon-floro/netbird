@@ -83,15 +83,99 @@ func RunTranslatedRoute(t *testing.T, newManager NewManagerFunc) {
 	assert.Error(t, overlay.DialAddr(allowed), "without the mapping the alias must lead nowhere")
 }
 
+// RunNestedTranslatedRoutes maps a subnet and a host inside it onto different hosts of the
+// routed network, as a site alias and a host alias inside it would be. The host is the more
+// specific route, so its mapping must win whichever of the two the backend learns first.
+func RunNestedTranslatedRoutes(t *testing.T, newManager NewManagerFunc) {
+	t.Helper()
+
+	var (
+		overlayHost = netip.MustParsePrefix("100.96.0.1/24")
+		overlayPeer = netip.MustParsePrefix("100.96.0.2/24")
+		lanHost     = netip.MustParsePrefix("192.168.77.1/24")
+		lanPeer     = netip.MustParsePrefix("192.168.77.4/24")
+		lanOther    = netip.MustParsePrefix("192.168.77.5/24")
+		subnetAlias = netip.MustParsePrefix("10.201.7.0/24")
+		inSubnet    = netip.MustParseAddrPort("10.201.7.4:102")
+		hostAlias   = netip.MustParseAddrPort("10.201.7.99:102")
+	)
+
+	overlay := NewPeerNamespace(t)
+	lan := NewPeerNamespace(t)
+	overlay.AddIPv4(t, overlayHost, overlayPeer)
+	lan.AddIPv4(t, lanHost, lanPeer)
+	lan.AddPeerAddr(t, lanOther)
+	overlay.AddPeerRoute(t, subnetAlias, overlayHost.Addr())
+
+	toPeer := lan.ListenPeer(t, netip.AddrPortFrom(lanPeer.Addr(), inSubnet.Port()))
+	toOther := lan.ListenPeer(t, netip.AddrPortFrom(lanOther.Addr(), hostAlias.Port()))
+
+	fw := newManager(t, overlay.IfaceName, wgaddr.Address{IP: overlayHost.Addr(), Network: overlayHost.Masked()})
+	require.NoError(t, fw.EnableRouting(), "enable routing")
+	t.Cleanup(func() { assert.NoError(t, fw.DisableRouting(), "disable routing") })
+
+	anySource := firewall.Network{Prefix: netip.MustParsePrefix("0.0.0.0/0")}
+	subnet := firewall.RouterPair{
+		ID:          "subnet",
+		Source:      anySource,
+		Destination: firewall.Network{Prefix: subnetAlias},
+		Masquerade:  true,
+		Translated:  lanPeer.Masked(),
+	}
+	host := firewall.RouterPair{
+		ID:          "host",
+		Source:      anySource,
+		Destination: firewall.Network{Prefix: netip.PrefixFrom(hostAlias.Addr(), 32)},
+		Masquerade:  true,
+		Translated:  netip.PrefixFrom(lanOther.Addr(), 32),
+	}
+
+	sources := []netip.Prefix{netip.PrefixFrom(overlayPeer.Addr(), 32)}
+	_, err := fw.AddFilterRule(nil, sources, firewall.Network{Prefix: lanPeer.Masked()}, firewall.ProtocolTCP,
+		nil, &firewall.Port{Values: []uint16{inSubnet.Port()}}, firewall.ActionAccept)
+	require.NoError(t, err, "add route ACL on the translated prefix")
+	require.NoError(t, fw.Flush(), "flush")
+
+	reaches := func(dst netip.AddrPort, accepted <-chan netip.AddrPort, msg string) {
+		t.Helper()
+		require.Eventually(t, func() bool { return overlay.DialAddr(dst) == nil }, 10*time.Second,
+			200*time.Millisecond, msg)
+		select {
+		case <-accepted:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: the expected host never accepted the connection", msg)
+		}
+	}
+
+	// The subnet first: a host mapping placed after it would never be reached.
+	require.NoError(t, fw.AddNatRule(subnet), "add subnet mapping")
+	require.NoError(t, fw.AddNatRule(host), "add host mapping")
+	reaches(hostAlias, toOther, "the host alias must reach the host it is mapped onto")
+	reaches(inSubnet, toPeer, "the rest of the subnet alias must keep the subnet mapping")
+
+	// Now the host first: the subnet learned after it must not shadow it either.
+	require.NoError(t, fw.RemoveNatRule(subnet), "remove subnet mapping")
+	require.NoError(t, fw.AddNatRule(subnet), "add subnet mapping again")
+	reaches(hostAlias, toOther, "the host alias must still reach its host")
+	reaches(inSubnet, toPeer, "the subnet alias must reach its host again")
+}
+
 // AddIPv4 assigns host to the host end and peer to the peer end, for tests that route IPv4
 // through the host namespace.
 func (ns *PeerNamespace) AddIPv4(t *testing.T, host, peer netip.Prefix) {
 	t.Helper()
 
 	require.NoError(t, addAddr(ns.IfaceName, host), "add %s to the host end", host)
+	ns.AddPeerAddr(t, peer)
+}
+
+// AddPeerAddr assigns another address to the peer end.
+func (ns *PeerNamespace) AddPeerAddr(t *testing.T, prefix netip.Prefix) {
+	t.Helper()
+
 	var err error
-	ns.do(func() { err = addAddr(ns.peerName, peer) })
-	require.NoError(t, err, "add %s to the peer end", peer)
+	ns.do(func() { err = addAddr(ns.peerName, prefix) })
+	require.NoError(t, err, "add %s to the peer end", prefix)
 }
 
 // AddPeerRoute makes the namespace reach dst through the host end at via.

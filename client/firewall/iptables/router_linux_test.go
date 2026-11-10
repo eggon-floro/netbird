@@ -53,7 +53,8 @@ func TestIptablesManager_RestoreOrCreateContainers(t *testing.T) {
 	// 9. mangle postrouting mark rule
 	// 10. jump rule to MSS clamping chain
 	// 11. MSS clamping rule for outbound traffic
-	require.Len(t, manager.rules, 11, "should have created rules map")
+	// 12. jump rule to the translated routes chain
+	require.Len(t, manager.rules, 12, "should have created rules map")
 
 	exists, err := manager.iptablesClient.Exists(tableNat, chainPostrouting, "-j", chainRTNAT)
 	require.NoError(t, err, "should be able to query the iptables %s table and %s chain", tableNat, chainPostrouting)
@@ -545,16 +546,27 @@ func TestIptablesManager_TranslatedRouteForwards(t *testing.T) {
 		t.SkipNow()
 	}
 
-	fwtest.RunTranslatedRoute(t, func(t *testing.T, ifaceName string, addr wgaddr.Address) firewall.Manager {
-		t.Helper()
-		mock := &iFaceMock{
-			NameFunc:    func() string { return ifaceName },
-			AddressFunc: func() wgaddr.Address { return addr },
-		}
-		manager, err := Create(mock, iface.DefaultMTU)
-		require.NoError(t, err, "create manager")
-		require.NoError(t, manager.Init(nil))
-		t.Cleanup(func() { assert.NoError(t, manager.Close(nil), "close manager") })
-		return manager
-	})
+	fwtest.RunTranslatedRoute(t, newRoutingManager)
+}
+
+func TestIptablesManager_NestedTranslatedRoutesForward(t *testing.T) {
+	if !isIptablesSupported() {
+		t.SkipNow()
+	}
+
+	fwtest.RunNestedTranslatedRoutes(t, newRoutingManager)
+}
+
+// newRoutingManager creates a manager on a real interface for the packet-level routing tests.
+func newRoutingManager(t *testing.T, ifaceName string, addr wgaddr.Address) firewall.Manager {
+	t.Helper()
+	mock := &iFaceMock{
+		NameFunc:    func() string { return ifaceName },
+		AddressFunc: func() wgaddr.Address { return addr },
+	}
+	manager, err := Create(mock, iface.DefaultMTU)
+	require.NoError(t, err, "create manager")
+	require.NoError(t, manager.Init(nil))
+	t.Cleanup(func() { assert.NoError(t, manager.Close(nil), "close manager") })
+	return manager
 }

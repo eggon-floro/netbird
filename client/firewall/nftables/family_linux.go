@@ -84,6 +84,10 @@ type family struct {
 	// plumbing that isn't a filter rule).
 	rules map[firewall.RuleID]*nftables.Rule
 
+	// translations holds the destination of each translation rule, to keep
+	// the redirect chain ordered most specific first.
+	translations map[firewall.RuleID]netip.Prefix
+
 	// Peer ACL chain handles.
 	chainInputRules    *nftables.Chain
 	chainPrerouting    *nftables.Chain
@@ -105,6 +109,7 @@ func newFamily(workTable *nftables.Table, wgIface iFaceMapper, mtu uint16) *fami
 		chains:             make(map[string]*nftables.Chain),
 		filters:            make(map[firewall.RuleID]*Rule),
 		rules:              make(map[firewall.RuleID]*nftables.Rule),
+		translations:       make(map[firewall.RuleID]netip.Prefix),
 		routingFwChainName: chainNameRoutingFw,
 		af:                 familyForAddr(workTable.Family == nftables.TableFamilyIPv4),
 		wgIface:            wgIface,

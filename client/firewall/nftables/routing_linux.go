@@ -4,6 +4,7 @@ package nftables
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/google/nftables"
@@ -137,12 +138,45 @@ func (r *family) queueTranslationRule(pair firewall.RouterPair) {
 		},
 	)
 
-	r.rules[ruleID] = r.conn.AddRule(&nftables.Rule{
+	rule := &nftables.Rule{
 		Table:    r.workTable,
 		Chain:    r.chains[chainNameRoutingRdr],
 		Exprs:    exprs,
 		UserData: []byte(ruleID),
-	})
+	}
+	before, err := r.translationPosition(ruleID, pair.Destination.Prefix)
+	if err != nil {
+		log.Warnf("order translation rule %s, appending it: %v", ruleID, err)
+	}
+	if before != 0 {
+		rule.Position = before
+		r.rules[ruleID] = r.conn.InsertRule(rule)
+	} else {
+		r.rules[ruleID] = r.conn.AddRule(rule)
+	}
+	r.translations[ruleID] = pair.Destination.Prefix
+}
+
+// translationPosition returns the handle of the rule that the translation rule
+// for prefix goes in front of, or 0 to append it. Translation rules are kept
+// most specific first, so a host mapped inside a mapped subnet takes precedence
+// the way its more specific route does.
+func (r *family) translationPosition(ruleID firewall.RuleID, prefix netip.Prefix) (uint64, error) {
+	rules, err := r.conn.GetRules(r.workTable, r.chains[chainNameRoutingRdr])
+	if err != nil {
+		return 0, fmt.Errorf("list %s rules: %w", chainNameRoutingRdr, err)
+	}
+	for _, rule := range rules {
+		id := firewall.RuleID(rule.UserData)
+		// The pair's previous rule may still be listed: its removal is queued.
+		if id == ruleID {
+			continue
+		}
+		if other, ok := r.translations[id]; ok && other.Bits() < prefix.Bits() {
+			return rule.Handle, nil
+		}
+	}
+	return 0, nil
 }
 
 // removeTranslationRule queues the removal of the pair's translation rule. The
@@ -152,12 +186,14 @@ func (r *family) removeTranslationRule(pair firewall.RouterPair) error {
 
 	rule, exists := r.rules[ruleID]
 	if !exists {
+		delete(r.translations, ruleID)
 		return nil
 	}
 
 	if rule.Handle == 0 {
 		log.Warnf("translation rule %s has no handle, removing stale entry", ruleID)
 		delete(r.rules, ruleID)
+		delete(r.translations, ruleID)
 		return nil
 	}
 
@@ -165,6 +201,7 @@ func (r *family) removeTranslationRule(pair firewall.RouterPair) error {
 		return fmt.Errorf("remove translation rule %s: %w", ruleID, err)
 	}
 	delete(r.rules, ruleID)
+	delete(r.translations, ruleID)
 
 	return nil
 }

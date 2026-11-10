@@ -4,6 +4,8 @@ package iptables
 
 import (
 	"fmt"
+	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
@@ -294,7 +296,8 @@ func (r *family) addTranslationRules(pair firewall.RouterPair) error {
 		"-d", destination,
 		"-j", "NETMAP", "--to", pair.Translated.Masked().String(),
 	}
-	if err := r.iptablesClient.Append(tableNat, chainRTRdr, translate...); err != nil {
+	position := r.translationPosition(pair.Destination.Prefix)
+	if err := r.iptablesClient.Insert(tableNat, chainRTRdr, position, translate...); err != nil {
 		return fmt.Errorf("map %s onto %s: %w", destination, pair.Translated, err)
 	}
 	r.rules[pair.GenKey(firewall.TranslationFormat)] = translate
@@ -313,6 +316,34 @@ func (r *family) addTranslationRules(pair firewall.RouterPair) error {
 	r.rules[pair.GenKey(firewall.TranslationGuardFormat)] = accept
 
 	return nil
+}
+
+// translationPosition returns where the NETMAP rule for prefix goes in the
+// redirect chain. NETMAP rules stay at the head of the chain, most specific
+// first, so a host mapped inside a mapped subnet takes precedence the way its
+// more specific route does. The other rules in the chain are appended.
+func (r *family) translationPosition(prefix netip.Prefix) int {
+	position := 1
+	for _, spec := range r.rules {
+		if other, ok := netmapDestination(spec); ok && other.Bits() >= prefix.Bits() {
+			position++
+		}
+	}
+	return position
+}
+
+// netmapDestination returns the destination of a NETMAP rule built by
+// addTranslationRules, and false for any other rule.
+func netmapDestination(spec []string) (netip.Prefix, bool) {
+	if !slices.Contains(spec, "NETMAP") {
+		return netip.Prefix{}, false
+	}
+	i := slices.Index(spec, "-d")
+	if i < 0 || i+1 >= len(spec) {
+		return netip.Prefix{}, false
+	}
+	prefix, err := netip.ParsePrefix(spec[i+1])
+	return prefix, err == nil
 }
 
 // rollbackTranslationRules undoes a partly applied translated pair. The caller

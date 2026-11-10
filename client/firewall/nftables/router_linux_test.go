@@ -1284,16 +1284,27 @@ func TestNftablesManager_TranslatedRouteForwards(t *testing.T) {
 		t.Skip("nftables not supported on this system")
 	}
 
-	fwtest.RunTranslatedRoute(t, func(t *testing.T, ifaceName string, addr wgaddr.Address) firewall.Manager {
-		t.Helper()
-		mock := &iFaceMock{
-			NameFunc:    func() string { return ifaceName },
-			AddressFunc: func() wgaddr.Address { return addr },
-		}
-		manager, err := Create(mock, iface.DefaultMTU)
-		require.NoError(t, err, "create manager")
-		require.NoError(t, manager.Init(nil))
-		t.Cleanup(func() { assert.NoError(t, manager.Close(nil), "close manager") })
-		return manager
-	})
+	fwtest.RunTranslatedRoute(t, newRoutingManager)
+}
+
+func TestNftablesManager_NestedTranslatedRoutesForward(t *testing.T) {
+	if check() != NFTABLES {
+		t.Skip("nftables not supported on this system")
+	}
+
+	fwtest.RunNestedTranslatedRoutes(t, newRoutingManager)
+}
+
+// newRoutingManager creates a manager on a real interface for the packet-level routing tests.
+func newRoutingManager(t *testing.T, ifaceName string, addr wgaddr.Address) firewall.Manager {
+	t.Helper()
+	mock := &iFaceMock{
+		NameFunc:    func() string { return ifaceName },
+		AddressFunc: func() wgaddr.Address { return addr },
+	}
+	manager, err := Create(mock, iface.DefaultMTU)
+	require.NoError(t, err, "create manager")
+	require.NoError(t, manager.Init(nil))
+	t.Cleanup(func() { assert.NoError(t, manager.Close(nil), "close manager") })
+	return manager
 }
