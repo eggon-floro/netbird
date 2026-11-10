@@ -462,3 +462,92 @@ func buildRoutedResourceComponents(t *testing.T) (*types.NetworkMapComponents, s
 
 	return c, routerKey
 }
+
+// TestEnvelopeToNetworkMap_TranslatedResource follows a resource that the
+// routing peer maps onto the hosts' own prefix through the envelope. Peers
+// route the resource address, the routing peer learns the prefix it maps onto,
+// and its route firewall rules name that prefix, because it filters after the
+// translation.
+func TestEnvelopeToNetworkMap_TranslatedResource(t *testing.T) {
+	ctx := context.Background()
+	c, routerKey := buildRoutedResourceComponents(t)
+	sourceKey := c.Peers["peer-S"].Key
+	alias := c.NetworkResources[0].Prefix
+	realPrefix := netip.MustParsePrefix("192.168.77.0/24")
+	c.NetworkResources[0].TranslatedPrefix = realPrefix
+
+	decoded := encodeAndDecodeEnvelope(t, c)
+
+	router, err := nbnetworkmap.EnvelopeToNetworkMap(ctx, decoded, routerKey, "netbird.cloud", false)
+	require.NoError(t, err, "EnvelopeToNetworkMap for the routing peer")
+	routerRoute := findRoute(router.NetworkMap.Routes, alias)
+	require.NotNil(t, routerRoute, "the routing peer must receive the resource route")
+	assert.Equal(t, realPrefix.String(), routerRoute.TranslatedNetwork, "the routing peer must learn the prefix it maps onto")
+	require.NotEmpty(t, router.NetworkMap.RoutesFirewallRules, "the routing peer must receive route firewall rules")
+	for i, rule := range router.NetworkMap.RoutesFirewallRules {
+		assert.Equalf(t, realPrefix.String(), rule.Destination,
+			"RoutesFirewallRules[%d] must name the translated prefix, or it never matches", i)
+	}
+
+	decoded = encodeAndDecodeEnvelope(t, c)
+	source, err := nbnetworkmap.EnvelopeToNetworkMap(ctx, decoded, sourceKey, "netbird.cloud", false)
+	require.NoError(t, err, "EnvelopeToNetworkMap for the source peer")
+	sourceRoute := findRoute(source.NetworkMap.Routes, alias)
+	require.NotNil(t, sourceRoute, "the source peer must route the resource address")
+	assert.Equal(t, routerKey, sourceRoute.Peer, "the source peer routes the resource through the routing peer")
+	assert.Nil(t, findRoute(source.NetworkMap.Routes, realPrefix), "the source peer must not route the translated prefix")
+}
+
+// TestEnvelopeToNetworkMap_UnreadableTranslationSkipsResource corrupts the
+// translated prefix on the wire. Routing the resource untranslated would send
+// its traffic to whatever host owns the alias behind the routing peer, so the
+// resource must be left out and stay unreachable.
+func TestEnvelopeToNetworkMap_UnreadableTranslationSkipsResource(t *testing.T) {
+	ctx := context.Background()
+	c, routerKey := buildRoutedResourceComponents(t)
+	alias := c.NetworkResources[0].Prefix
+	c.NetworkResources[0].TranslatedPrefix = netip.MustParsePrefix("192.168.77.0/24")
+
+	envelope := mgmtgrpc.EncodeNetworkMapEnvelope(mgmtgrpc.ComponentsEnvelopeInput{
+		Components: c,
+		DNSDomain:  "netbird.cloud",
+	})
+	require.NotNil(t, envelope.GetFull())
+	require.Len(t, envelope.GetFull().NetworkResources, 1, "fixture has one network resource")
+	require.Equal(t, "192.168.77.0/24", envelope.GetFull().NetworkResources[0].TranslatedPrefixCidr, "the encoder must carry the translation")
+	envelope.GetFull().NetworkResources[0].TranslatedPrefixCidr = "not-a-prefix"
+
+	wire, err := goproto.Marshal(envelope)
+	require.NoError(t, err, "marshal envelope")
+	var decoded proto.NetworkMapEnvelope
+	require.NoError(t, goproto.Unmarshal(wire, &decoded), "unmarshal envelope")
+
+	result, err := nbnetworkmap.EnvelopeToNetworkMap(ctx, &decoded, routerKey, "netbird.cloud", false)
+	require.NoError(t, err, "one unreadable resource must not fail the whole sync")
+	assert.Empty(t, result.Components.NetworkResources, "the resource with an unreadable translation must be dropped")
+	assert.Nil(t, findRoute(result.NetworkMap.Routes, alias), "no route must be served for the dropped resource")
+	assert.Empty(t, result.NetworkMap.RoutesFirewallRules, "no route firewall rules must be produced for the dropped resource")
+}
+
+func encodeAndDecodeEnvelope(t *testing.T, c *types.NetworkMapComponents) *proto.NetworkMapEnvelope {
+	t.Helper()
+
+	envelope := mgmtgrpc.EncodeNetworkMapEnvelope(mgmtgrpc.ComponentsEnvelopeInput{
+		Components: c,
+		DNSDomain:  "netbird.cloud",
+	})
+	wire, err := goproto.Marshal(envelope)
+	require.NoError(t, err, "marshal envelope")
+	var decoded proto.NetworkMapEnvelope
+	require.NoError(t, goproto.Unmarshal(wire, &decoded), "unmarshal envelope")
+	return &decoded
+}
+
+func findRoute(routes []*proto.Route, network netip.Prefix) *proto.Route {
+	for _, r := range routes {
+		if r.Network == network.String() {
+			return r
+		}
+	}
+	return nil
+}

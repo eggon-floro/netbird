@@ -2073,6 +2073,10 @@ components:
           description: Network resource address (either a direct host like 1.1.1.1 or 1.1.1.1/32, or a subnet like 192.168.178.0/24, or domains like example.com and *.example.com)
           type: string
           example: "1.1.1.1"
+        translated_address:
+          description: Address the routing peers translate `address` to before forwarding, one address for each address. Peers reach the resource at `address`, while the hosts behind the routing peers keep the addresses in `translated_address`. It lets networks that use the same addresses be reached at the same time under distinct ones. Only for host and subnet resources, and it must have the same IP version and prefix length as `address`
+          type: string
+          example: "192.168.178.0/24"
         enabled:
           description: Network resource status
           type: boolean

@@ -579,6 +579,9 @@ func (e *componentEncoder) encodeNetworkResources(resources []*nmdata.NetworkRes
 		if r.Prefix.IsValid() {
 			entry.PrefixCidr = r.Prefix.String()
 		}
+		if r.TranslatedPrefix.IsValid() {
+			entry.TranslatedPrefixCidr = r.TranslatedPrefix.String()
+		}
 		out = append(out, entry)
 	}
 	return out

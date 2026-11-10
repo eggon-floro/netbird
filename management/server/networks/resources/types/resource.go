@@ -40,7 +40,14 @@ type NetworkResource struct {
 	GroupIDs    []string `gorm:"-"`
 	Domain      string
 	Prefix      netip.Prefix `gorm:"serializer:json"`
-	Enabled     bool
+	// TranslatedAddress is the request form of TranslatedPrefix.
+	TranslatedAddress string `gorm:"-"`
+	// TranslatedPrefix is the prefix the routing peers map Prefix onto, address
+	// for address, before forwarding. Peers reach the resource at Prefix, while
+	// the hosts behind the routing peers keep their addresses in TranslatedPrefix.
+	// Zero when the resource is reached at Prefix itself.
+	TranslatedPrefix netip.Prefix `gorm:"serializer:json"`
+	Enabled          bool
 }
 
 func NewNetworkResource(accountID, networkID, name, description, address string, groupIDs []string, enabled bool) (*NetworkResource, error) {
@@ -70,7 +77,7 @@ func (n *NetworkResource) ToAPIResponse(groups []api.GroupMinimum) *api.NetworkR
 		addr = n.Domain
 	}
 
-	return &api.NetworkResource{
+	resource := &api.NetworkResource{
 		Id:          n.ID,
 		Name:        n.Name,
 		Description: &n.Description,
@@ -79,6 +86,11 @@ func (n *NetworkResource) ToAPIResponse(groups []api.GroupMinimum) *api.NetworkR
 		Groups:      groups,
 		Enabled:     n.Enabled,
 	}
+	if n.TranslatedPrefix.IsValid() {
+		translated := n.TranslatedPrefix.String()
+		resource.TranslatedAddress = &translated
+	}
+	return resource
 }
 
 func (n *NetworkResource) FromAPIRequest(req *api.NetworkResourceRequest) {
@@ -88,24 +100,29 @@ func (n *NetworkResource) FromAPIRequest(req *api.NetworkResourceRequest) {
 		n.Description = *req.Description
 	}
 	n.Address = req.Address
+	if req.TranslatedAddress != nil {
+		n.TranslatedAddress = *req.TranslatedAddress
+	}
 	n.GroupIDs = req.Groups
 	n.Enabled = req.Enabled
 }
 
 func (n *NetworkResource) Copy() *NetworkResource {
 	return &NetworkResource{
-		ID:          n.ID,
-		AccountID:   n.AccountID,
-		NetworkID:   n.NetworkID,
-		PublicID:    n.PublicID,
-		Name:        n.Name,
-		Description: n.Description,
-		Type:        n.Type,
-		Address:     n.Address,
-		Domain:      n.Domain,
-		Prefix:      n.Prefix,
-		GroupIDs:    n.GroupIDs,
-		Enabled:     n.Enabled,
+		ID:                n.ID,
+		AccountID:         n.AccountID,
+		NetworkID:         n.NetworkID,
+		PublicID:          n.PublicID,
+		Name:              n.Name,
+		Description:       n.Description,
+		Type:              n.Type,
+		Address:           n.Address,
+		Domain:            n.Domain,
+		Prefix:            n.Prefix,
+		TranslatedAddress: n.TranslatedAddress,
+		TranslatedPrefix:  n.TranslatedPrefix,
+		GroupIDs:          n.GroupIDs,
+		Enabled:           n.Enabled,
 	}
 }
 
@@ -128,6 +145,7 @@ func (n *NetworkResource) ToRoute(peer *nbpeer.Peer, router *routerTypes.Network
 
 	if n.Type == Host || n.Type == Subnet {
 		r.Network = n.Prefix
+		r.TranslatedNetwork = n.TranslatedPrefix
 
 		r.NetworkType = route.IPv4Network
 		if n.Prefix.Addr().Is6() {
@@ -152,6 +170,54 @@ func (n *NetworkResource) ToRoute(peer *nbpeer.Peer, router *routerTypes.Network
 
 func (n *NetworkResource) EventMeta(network *networkTypes.Network) map[string]any {
 	return map[string]any{"name": n.Name, "type": n.Type, "network_name": network.Name, "network_id": network.ID}
+}
+
+// ApplyTranslatedAddress validates TranslatedAddress against the resource's
+// type and prefix and stores it as TranslatedPrefix. An empty address clears
+// the translation. The translation maps address for address, so it needs a
+// host or subnet resource and a prefix of the same IP version and length.
+func (n *NetworkResource) ApplyTranslatedAddress() error {
+	n.TranslatedPrefix = netip.Prefix{}
+	if n.TranslatedAddress == "" {
+		return nil
+	}
+
+	if n.Type != Host && n.Type != Subnet {
+		return errors.New("only host and subnet resources can be translated")
+	}
+
+	translated, err := parsePrefixOrAddr(n.TranslatedAddress)
+	if err != nil {
+		return errors.New("not a valid host or subnet")
+	}
+	translated = translated.Masked()
+
+	prefix := n.Prefix.Masked()
+	if translated.Addr().Is4() != prefix.Addr().Is4() {
+		return errors.New("IP version differs from the resource address")
+	}
+	if translated.Bits() != prefix.Bits() {
+		return errors.New("prefix length differs from the resource address")
+	}
+	if translated == prefix {
+		return errors.New("same as the resource address")
+	}
+
+	n.TranslatedPrefix = translated
+	return nil
+}
+
+func parsePrefixOrAddr(address string) (netip.Prefix, error) {
+	if prefix, err := netip.ParsePrefix(address); err == nil {
+		return prefix, nil
+	}
+
+	addr, err := netip.ParseAddr(address)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	addr = addr.Unmap()
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
 }
 
 // GetResourceType returns the type of the resource based on the address

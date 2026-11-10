@@ -4,8 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"go.uber.org/mock/gomock"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	reverseproxy "github.com/netbirdio/netbird/management/internals/modules/reverseproxy/service"
 	"github.com/netbirdio/netbird/management/server/groups"
@@ -445,4 +446,104 @@ func Test_DeleteResourceFailsWithPermissionDenied(t *testing.T) {
 
 	err = manager.DeleteResource(ctx, accountID, userID, networkID, resourceID)
 	require.Error(t, err)
+}
+
+func Test_ResourceTranslatedAddressIsStoredAndCleared(t *testing.T) {
+	ctx := context.Background()
+	accountID := "testAccountId"
+	userID := "testAdminId"
+	networkID := "testNetworkId"
+
+	store, cleanUp, err := store.NewTestStoreFromSQL(context.Background(), "../../testdata/networks.sql", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanUp)
+	permissionsManager := permissions.NewManager(store)
+	am := mock_server.MockAccountManager{}
+	groupsManager := groups.NewManagerMock()
+	ctrl := gomock.NewController(t)
+	serviceManager := reverseproxy.NewMockManager(ctrl)
+	serviceManager.EXPECT().ReloadAllServicesForAccount(gomock.Any(), accountID).Return(nil).AnyTimes()
+	manager := NewManager(store, permissionsManager, groupsManager, &am, serviceManager)
+
+	created, err := manager.CreateResource(ctx, userID, &types.NetworkResource{
+		AccountID:         accountID,
+		NetworkID:         networkID,
+		Name:              "translatedResource",
+		Address:           "10.201.7.0/24",
+		TranslatedAddress: "192.168.77.0/24",
+	})
+	require.NoError(t, err)
+
+	// Read it back through the store, which is what the network map is built from.
+	stored, err := manager.GetResource(ctx, accountID, userID, networkID, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "10.201.7.0/24", stored.Prefix.String(), "peers reach the resource at its address")
+	assert.Equal(t, "192.168.77.0/24", stored.TranslatedPrefix.String(), "the translation must survive the store")
+
+	// An update without a translated address removes the translation.
+	_, err = manager.UpdateResource(ctx, userID, &types.NetworkResource{
+		ID:        created.ID,
+		AccountID: accountID,
+		NetworkID: networkID,
+		Name:      "translatedResource",
+		Address:   "10.201.7.0/24",
+	})
+	require.NoError(t, err)
+
+	stored, err = manager.GetResource(ctx, accountID, userID, networkID, created.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.TranslatedPrefix.IsValid(), "the translation must be cleared, got %s", stored.TranslatedPrefix)
+}
+
+func Test_ResourceInvalidTranslatedAddressIsRejected(t *testing.T) {
+	ctx := context.Background()
+	accountID := "testAccountId"
+	userID := "testAdminId"
+	networkID := "testNetworkId"
+
+	store, cleanUp, err := store.NewTestStoreFromSQL(context.Background(), "../../testdata/networks.sql", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanUp)
+	permissionsManager := permissions.NewManager(store)
+	am := mock_server.MockAccountManager{}
+	groupsManager := groups.NewManagerMock()
+	ctrl := gomock.NewController(t)
+	serviceManager := reverseproxy.NewMockManager(ctrl)
+	manager := NewManager(store, permissionsManager, groupsManager, &am, serviceManager)
+
+	created, err := manager.CreateResource(ctx, userID, &types.NetworkResource{
+		AccountID:         accountID,
+		NetworkID:         networkID,
+		Name:              "translatedResource",
+		Address:           "10.201.7.0/24",
+		TranslatedAddress: "192.168.0.0/16",
+	})
+	require.Error(t, err)
+	require.Nil(t, created)
+	assertInvalidArgument(t, err)
+
+	// The same check guards updates of an existing resource.
+	updated, err := manager.UpdateResource(ctx, userID, &types.NetworkResource{
+		ID:                "testResourceId",
+		AccountID:         accountID,
+		NetworkID:         networkID,
+		Name:              "testResourceId",
+		Address:           "example.com",
+		TranslatedAddress: "192.168.77.4",
+	})
+	require.Error(t, err)
+	require.Nil(t, updated)
+	assertInvalidArgument(t, err)
+}
+
+func assertInvalidArgument(t *testing.T, err error) {
+	t.Helper()
+
+	sErr, ok := status.FromError(err)
+	require.True(t, ok, "error must carry a status, got %v", err)
+	assert.Equal(t, status.InvalidArgument, sErr.Type(), "a bad translated address is the caller's mistake")
 }

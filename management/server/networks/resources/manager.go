@@ -110,9 +110,15 @@ func (m *managerImpl) CreateResource(ctx context.Context, userID string, resourc
 		return nil, status.NewPermissionDeniedError()
 	}
 
+	translatedAddress := resource.TranslatedAddress
 	resource, err = types.NewNetworkResource(resource.AccountID, resource.NetworkID, resource.Name, resource.Description, resource.Address, resource.GroupIDs, resource.Enabled)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new network resource: %w", err)
+	}
+
+	resource.TranslatedAddress = translatedAddress
+	if err := resource.ApplyTranslatedAddress(); err != nil {
+		return nil, status.Errorf(status.InvalidArgument, "invalid translated address: %v", err)
 	}
 
 	var eventsToStore []func()
@@ -220,6 +226,10 @@ func (m *managerImpl) UpdateResource(ctx context.Context, userID string, resourc
 	resource.Type = resourceType
 	resource.Domain = domain
 	resource.Prefix = prefix
+
+	if err := resource.ApplyTranslatedAddress(); err != nil {
+		return nil, status.Errorf(status.InvalidArgument, "invalid translated address: %v", err)
+	}
 
 	var eventsToStore []func()
 	var snap *affectedpeers.Snapshot
