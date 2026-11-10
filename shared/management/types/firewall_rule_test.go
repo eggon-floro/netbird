@@ -194,3 +194,32 @@ func TestGenerateRouteFirewallRules_IncludeIPv6False(t *testing.T) {
 		assert.Equal(t, []string{"100.64.0.1/32", "100.64.0.2/32"}, rules[0].SourceRanges)
 	})
 }
+
+// TestGenerateRouteFirewallRules_TranslatedRoute covers a route that the routing
+// peer maps onto the hosts' own prefix. The routing peer filters after the
+// translation, so a rule on the alias would never match and the traffic would
+// be dropped.
+func TestGenerateRouteFirewallRules_TranslatedRoute(t *testing.T) {
+	peers := []*nmdata.Peer{
+		{IP: netip.MustParseAddr("100.64.0.1")},
+	}
+
+	r := &nmdata.Route{
+		ID:                "route1",
+		Network:           netip.MustParsePrefix("10.201.7.0/24"),
+		TranslatedNetwork: netip.MustParsePrefix("192.168.77.0/24"),
+	}
+	rule := &nmdata.PolicyRule{
+		PolicyID: "policy1",
+		ID:       "rule1",
+		Action:   string(PolicyTrafficActionAccept),
+		Protocol: string(PolicyRuleProtocolTCP),
+		Ports:    []string{"102"},
+	}
+
+	rules := GenerateRouteFirewallRules(context.Background(), r, rule, peers, FirewallRuleDirectionIN, true)
+
+	require.Len(t, rules, 1)
+	assert.Equal(t, "192.168.77.0/24", rules[0].Destination, "the rule must name the prefix the traffic is forwarded to")
+	assert.Equal(t, []string{"100.64.0.1/32"}, rules[0].SourceRanges, "the sources are the peers, untranslated")
+}

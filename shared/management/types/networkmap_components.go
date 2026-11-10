@@ -676,7 +676,7 @@ func (c *NetworkMapComponents) getDefaultPermit(r *nmdata.Route, includeIPv6 boo
 	rule := RouteFirewallRule{
 		SourceRanges: sources,
 		Action:       string(PolicyTrafficActionAccept),
-		Destination:  r.Network.String(),
+		Destination:  r.ForwardedNetwork().String(),
 		Protocol:     string(PolicyRuleProtocolALL),
 		Domains:      r.Domains,
 		IsDynamic:    r.IsDynamic(),
@@ -889,6 +889,7 @@ func (c *NetworkMapComponents) networkResourceToRoute(resource *nmdata.NetworkRe
 
 	if resource.Type == string(ResourceTypeHost) || resource.Type == string(ResourceTypeSubnet) {
 		r.Network = resource.Prefix
+		r.TranslatedNetwork = resource.TranslatedPrefix
 
 		r.NetworkType = nmdata.NetworkTypeIPv4
 		if resource.Prefix.Addr().Is6() {

@@ -1786,21 +1786,43 @@ func toRoutes(protoRoutes []*mgmProto.Route) []*route.Route {
 			}
 		}
 
+		translated, err := toTranslatedNetwork(protoRoute)
+		if err != nil {
+			// Serving the route untranslated would forward to the wrong hosts.
+			log.Errorf("Skipping route %s: %v", protoRoute.ID, err)
+			continue
+		}
+
 		convertedRoute := &route.Route{
-			ID:            route.ID(protoRoute.ID),
-			Network:       prefix.Masked(),
-			Domains:       domain.FromPunycodeList(protoRoute.Domains),
-			NetID:         route.NetID(protoRoute.NetID),
-			NetworkType:   route.NetworkType(protoRoute.NetworkType),
-			Peer:          protoRoute.Peer,
-			Metric:        int(protoRoute.Metric),
-			Masquerade:    protoRoute.Masquerade,
-			KeepRoute:     protoRoute.KeepRoute,
-			SkipAutoApply: protoRoute.SkipAutoApply,
+			ID:                route.ID(protoRoute.ID),
+			Network:           prefix.Masked(),
+			TranslatedNetwork: translated,
+			Domains:           domain.FromPunycodeList(protoRoute.Domains),
+			NetID:             route.NetID(protoRoute.NetID),
+			NetworkType:       route.NetworkType(protoRoute.NetworkType),
+			Peer:              protoRoute.Peer,
+			Metric:            int(protoRoute.Metric),
+			Masquerade:        protoRoute.Masquerade,
+			KeepRoute:         protoRoute.KeepRoute,
+			SkipAutoApply:     protoRoute.SkipAutoApply,
 		}
 		routes = append(routes, convertedRoute)
 	}
 	return routes
+}
+
+// toTranslatedNetwork reads the prefix a route maps its network onto. A route
+// without one yields the zero prefix.
+func toTranslatedNetwork(protoRoute *mgmProto.Route) (netip.Prefix, error) {
+	if protoRoute.GetTranslatedNetwork() == "" {
+		return netip.Prefix{}, nil
+	}
+
+	translated, err := netip.ParsePrefix(protoRoute.GetTranslatedNetwork())
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("parse translated network: %w", err)
+	}
+	return translated.Masked(), nil
 }
 
 func toRouteDomains(myPubKey string, routes []*route.Route) []*dnsfwd.ForwarderEntry {

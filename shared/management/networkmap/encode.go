@@ -39,7 +39,7 @@ func ToProtocolRoutes(routes []*nmdata.Route) []*proto.Route {
 
 // ToProtocolRoute converts one typed route to its proto form.
 func ToProtocolRoute(route *nmdata.Route) *proto.Route {
-	return &proto.Route{
+	protoRoute := &proto.Route{
 		ID:            string(route.ID),
 		NetID:         string(route.NetID),
 		Network:       route.Network.String(),
@@ -51,6 +51,10 @@ func ToProtocolRoute(route *nmdata.Route) *proto.Route {
 		KeepRoute:     route.KeepRoute,
 		SkipAutoApply: route.SkipAutoApply,
 	}
+	if route.TranslatedNetwork.IsValid() {
+		protoRoute.TranslatedNetwork = route.TranslatedNetwork.String()
+	}
+	return protoRoute
 }
 
 // ToProtocolFirewallRules converts the firewall rules to the protocol form.

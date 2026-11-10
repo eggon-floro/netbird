@@ -75,7 +75,7 @@ func GenerateRouteFirewallRules(ctx context.Context, route *nmdata.Route, rule *
 		RouteID:      nbroute.ID(route.ID),
 		SourceRanges: sourceRanges,
 		Action:       rule.Action,
-		Destination:  route.Network.String(),
+		Destination:  route.ForwardedNetwork().String(),
 		Protocol:     rule.Protocol,
 		Domains:      route.Domains,
 		IsDynamic:    route.IsDynamic(),
