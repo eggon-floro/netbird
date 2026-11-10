@@ -617,6 +617,9 @@ message Route {
   repeated string Domains = 8;
   bool keepRoute = 9;
   bool skipAutoApply = 10;
+  // Prefix the routing peer maps Network onto, address for address, before
+  // forwarding. Empty when Network is routed as is.
+  string translatedNetwork = 11;
 }
 
 // DNSConfig represents a dns.Update
@@ -1226,6 +1229,7 @@ message NetworkResourceRaw {
   string domain_value = 7;  // resource.Domain
   string prefix_cidr = 8;
   bool enabled = 9;
+  string translated_prefix_cidr = 10;  // resource.TranslatedPrefix
 }
 
 // NetworkRouterList carries the routers backing one network.

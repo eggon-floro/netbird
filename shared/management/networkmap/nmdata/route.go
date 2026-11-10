@@ -24,6 +24,7 @@ type Route struct {
 	AccountID           string
 	PublicID            string
 	Network             netip.Prefix
+	TranslatedNetwork   netip.Prefix
 	Domains             domain.List
 	KeepRoute           bool
 	NetID               string
@@ -51,6 +52,7 @@ func (r *Route) Equal(other *Route) bool {
 		other.Description == r.Description &&
 		other.NetID == r.NetID &&
 		other.Network == r.Network &&
+		other.TranslatedNetwork == r.TranslatedNetwork &&
 		slices.Equal(r.Domains, other.Domains) &&
 		other.KeepRoute == r.KeepRoute &&
 		other.NetworkType == r.NetworkType &&
@@ -67,6 +69,17 @@ func (r *Route) Equal(other *Route) bool {
 
 func (r *Route) IsDynamic() bool {
 	return r.NetworkType == NetworkTypeDomain
+}
+
+// ForwardedNetwork returns the prefix the routing peer forwards to: the
+// translated prefix when the route maps Network onto one, Network otherwise.
+// The routing peer filters after the translation, so its route firewall rules
+// are written on this prefix.
+func (r *Route) ForwardedNetwork() netip.Prefix {
+	if r.TranslatedNetwork.IsValid() {
+		return r.TranslatedNetwork
+	}
+	return r.Network
 }
 
 func (r *Route) NetString() string {
@@ -90,6 +103,7 @@ func (r *Route) Copy() *Route {
 		AccountID:           r.AccountID,
 		PublicID:            r.PublicID,
 		Network:             r.Network,
+		TranslatedNetwork:   r.TranslatedNetwork,
 		Domains:             slices.Clone(r.Domains),
 		KeepRoute:           r.KeepRoute,
 		NetID:               r.NetID,

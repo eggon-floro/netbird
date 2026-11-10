@@ -159,7 +159,14 @@ func DecodeEnvelope(ctx context.Context, env *proto.NetworkMapEnvelope) (*types.
 		if nr == nil {
 			return nil, fmt.Errorf("invalid envelope: network_resources[%d] is nil", i)
 		}
-		c.NetworkResources = append(c.NetworkResources, decodeNetworkResource(nr))
+		resource, err := decodeNetworkResource(nr)
+		if err != nil {
+			// Routing the resource untranslated would forward to the wrong
+			// hosts, so it is left out and stays unreachable instead.
+			log.Warnf("envelope: network_resources[%d] skipped: %v", i, err)
+			continue
+		}
+		c.NetworkResources = append(c.NetworkResources, resource)
 	}
 
 	// Phase 7: routers_map (outer key = network seq id, inner key = peer-id
@@ -488,7 +495,7 @@ func decodeNameServerGroupRaw(nsg *proto.NameServerGroupRaw) *nmdata.NameServerG
 	return out
 }
 
-func decodeNetworkResource(nr *proto.NetworkResourceRaw) *nmdata.NetworkResource {
+func decodeNetworkResource(nr *proto.NetworkResourceRaw) (*nmdata.NetworkResource, error) {
 	out := &nmdata.NetworkResource{
 		ID:          nr.Id,
 		PublicID:    nr.Id,
@@ -505,7 +512,14 @@ func decodeNetworkResource(nr *proto.NetworkResourceRaw) *nmdata.NetworkResource
 			out.Prefix = p
 		}
 	}
-	return out
+	if nr.TranslatedPrefixCidr != "" {
+		p, err := netip.ParsePrefix(nr.TranslatedPrefixCidr)
+		if err != nil {
+			return nil, fmt.Errorf("parse translated prefix: %w", err)
+		}
+		out.TranslatedPrefix = p
+	}
+	return out, nil
 }
 
 func decodeSimpleRecords(records []*proto.SimpleRecord) []nmdata.SimpleRecord {

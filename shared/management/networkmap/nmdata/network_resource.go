@@ -14,5 +14,8 @@ type NetworkResource struct {
 	Address     string // TODO: isn't persisted in the DB
 	Domain      string
 	Prefix      netip.Prefix
-	Enabled     bool
+	// TranslatedPrefix is the prefix the routing peers map Prefix onto. Zero
+	// when the resource is reached at Prefix itself.
+	TranslatedPrefix netip.Prefix
+	Enabled          bool
 }
